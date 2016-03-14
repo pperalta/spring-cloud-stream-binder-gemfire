@@ -123,7 +123,7 @@ public class GemfireBinderTests {
 	 */
 	private void testMessageSendReceive(String[] groups, boolean partitioned) throws Exception {
 		LocatorLauncher locatorLauncher = null;
-		JavaApplication[] consumers = new JavaApplication[groups == null ? 1 : groups.length];
+		JavaApplication[] consumers = new JavaApplication[groups == null ? 1 : groups.length * 2];
 		JavaApplication producer = null;
 		int locatorPort = SocketUtils.findAvailableServerSocket();
 
@@ -143,9 +143,9 @@ public class GemfireBinderTests {
 				moduleProperties.setProperty("partitioned", "true");
 			}
 
-			for (int i = 0; i < consumers.length; i++) {
+			for (int i = 0; i < consumers.length ; i++) {
 				consumers[i] = launch(Consumer.class, moduleProperties,
-						groups == null ? null : Collections.singletonList(groups[i]));
+						groups == null ? null : Collections.singletonList(groups[i % 2]));
 			}
 			for (JavaApplication consumer : consumers) {
 				waitForConsumer(consumer);
@@ -384,7 +384,7 @@ public class GemfireBinderTests {
 		 * @throws Exception
 		 */
 		public static void main(String[] args) throws Exception {
-			GemfireMessageChannelBinder binder = new GemfireMessageChannelBinder(createCache());
+			final GemfireMessageChannelBinder binder = new GemfireMessageChannelBinder(createCache());
 			binder.setApplicationContext(new GenericApplicationContext());
 			binder.setIntegrationEvaluationContext(new StandardEvaluationContext());
 			binder.setBatchSize(1);
@@ -395,6 +395,7 @@ public class GemfireBinderTests {
 				@Override
 				public void handleMessage(Message<?> message) throws MessagingException {
 					messagePayload = (String) message.getPayload();
+System.out.println(binder + " received " + message);
 				}
 			});
 			String group = null;
@@ -403,7 +404,7 @@ public class GemfireBinderTests {
 			}
 			binder.bindConsumer(BINDING_NAME, group, consumerChannel, new Properties());
 			isBound = true;
-
+System.out.println(binder + " started");
 			Thread.sleep(Long.MAX_VALUE);
 		}
 	}
