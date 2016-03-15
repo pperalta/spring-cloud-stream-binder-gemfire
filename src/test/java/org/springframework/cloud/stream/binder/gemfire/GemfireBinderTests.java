@@ -16,7 +16,7 @@
 
 package org.springframework.cloud.stream.binder.gemfire;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
@@ -68,11 +68,6 @@ public class GemfireBinderTests {
 	 * Timeout value in milliseconds for operations to complete.
 	 */
 	private static final long TIMEOUT = 30000;
-
-	/**
-	 * Payload of test message.
-	 */
-	private static final String MESSAGE_PAYLOAD = "hello world";
 
 	/**
 	 * Name of binding used for producer and consumer bindings.
@@ -154,7 +149,7 @@ public class GemfireBinderTests {
 			producer = launch(Producer.class, moduleProperties, null);
 
 			for (JavaApplication consumer : consumers) {
-				assertEquals(MESSAGE_PAYLOAD, waitForMessage(consumer));
+				assertNotNull(waitForMessage(consumer));
 			}
 
 			if (partitioned) {
@@ -354,8 +349,9 @@ public class GemfireBinderTests {
 			properties.setProperty(BinderPropertyKeys.PARTITION_KEY_EXPRESSION, "payload");
 			binder.bindProducer(BINDING_NAME, producerChannel, properties);
 
-			Message<String> message = new GenericMessage<>(MESSAGE_PAYLOAD);
-			producerChannel.send(message);
+			for (int i = 0; i < 500; i++) {
+				producerChannel.send(new GenericMessage<>(String.valueOf(i)));
+			}
 
 			Thread.sleep(Long.MAX_VALUE);
 		}
