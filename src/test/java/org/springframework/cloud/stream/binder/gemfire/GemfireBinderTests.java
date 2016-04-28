@@ -24,8 +24,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
@@ -33,7 +36,6 @@ import com.gemstone.gemfire.cache.Cache;
 import com.gemstone.gemfire.distributed.LocatorLauncher;
 import com.oracle.tools.runtime.LocalPlatform;
 import com.oracle.tools.runtime.PropertiesBuilder;
-import com.oracle.tools.runtime.concurrent.RemoteCallable;
 import com.oracle.tools.runtime.console.SystemApplicationConsole;
 import com.oracle.tools.runtime.java.JavaApplication;
 import com.oracle.tools.runtime.java.LocalJavaApplicationBuilder;
@@ -43,20 +45,11 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.springframework.cloud.stream.binder.ConsumerProperties;
-import org.springframework.cloud.stream.binder.PartitionSelectorStrategy;
-import org.springframework.cloud.stream.binder.ProducerProperties;
-import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.cloud.stream.binder.gemfire.consumer.Consumer;
+import org.springframework.cloud.stream.binder.gemfire.producer.Producer;
 import org.springframework.data.gemfire.CacheFactoryBean;
-import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.expression.spel.support.StandardEvaluationContext;
 import org.springframework.integration.test.util.SocketUtils;
-import org.springframework.messaging.Message;
-import org.springframework.messaging.MessageHandler;
-import org.springframework.messaging.MessagingException;
-import org.springframework.messaging.SubscribableChannel;
-import org.springframework.messaging.support.ExecutorSubscribableChannel;
-import org.springframework.messaging.support.GenericMessage;
+import org.springframework.web.client.RestTemplate;
 
 /**
  * Tests for {@link GemfireMessageChannelBinder}.
@@ -69,17 +62,17 @@ public class GemfireBinderTests {
 	/**
 	 * Timeout value in milliseconds for operations to complete.
 	 */
-	private static final long TIMEOUT = 30000;
+	public static final long TIMEOUT = 30000;
 
 	/**
 	 * Payload of test message.
 	 */
-	private static final String MESSAGE_PAYLOAD = "hello world";
+	public static final String MESSAGE_PAYLOAD = "hello world";
 
 	/**
 	 * Name of binding used for producer and consumer bindings.
 	 */
-	private static final String BINDING_NAME = "test";
+	public static final String BINDING_NAME = "test";
 
 	/**
 	 * Name of GemFire Locator.
@@ -125,8 +118,8 @@ public class GemfireBinderTests {
 	 */
 	private void testMessageSendReceive(String[] groups, boolean partitioned) throws Exception {
 		LocatorLauncher locatorLauncher = null;
-		JavaApplication[] consumers = new JavaApplication[groups == null ? 1 : groups.length];
-		JavaApplication producer = null;
+		Map<Integer, JavaApplication> consumers = new HashMap<>();
+		Map<Integer, JavaApplication> producers = new HashMap<>();
 		int locatorPort = SocketUtils.findAvailableServerSocket();
 
 		try {
@@ -145,33 +138,40 @@ public class GemfireBinderTests {
 				moduleProperties.setProperty("partitioned", "true");
 			}
 
-			for (int i = 0; i < consumers.length; i++) {
-				consumers[i] = launch(Consumer.class, moduleProperties,
-						groups == null ? null : Collections.singletonList(groups[i]));
+			int consumerCount = groups == null ? 1 : groups.length;
+
+			for (int i = 0; i < consumerCount; i++) {
+				int consumerPort = SocketUtils.findAvailableServerSocket();
+				List<String> args = new ArrayList<>();
+				args.add(String.format("--server.port=%d", consumerPort));
+				if (groups != null) {
+					args.add(String.format("--group=%s", groups[i]));
+				}
+				consumers.put(consumerPort, launch(Consumer.class, moduleProperties, args));
 			}
-			for (JavaApplication consumer : consumers) {
-				waitForConsumer(consumer);
+			for (int consumerPort : consumers.keySet()) {
+				waitForConsumer(consumerPort);
 			}
 
-			producer = launch(Producer.class, moduleProperties, null);
+			int producerPort = SocketUtils.findAvailableServerSocket();
+			producers.put(producerPort, launch(Producer.class, moduleProperties,
+					Collections.singletonList(String.format("--server.port=%d", producerPort))));
 
-			for (JavaApplication consumer : consumers) {
-				assertEquals(MESSAGE_PAYLOAD, waitForMessage(consumer));
+			for (int consumerPort : consumers.keySet()) {
+				assertEquals(MESSAGE_PAYLOAD, waitForMessage(consumerPort));
 			}
 
 			if (partitioned) {
-				assertTrue(partitionSelectorUsed(producer));
+				assertTrue(partitionSelectorUsed(producers.keySet().iterator().next()));
 			}
 		}
  		finally {
-			if (producer != null) {
-				producer.close();
-			}
-			for (JavaApplication consumer : consumers) {
-				if (consumer != null) {
+			for (JavaApplication producer : producers.values()) {
+					producer.close();
+				}
+				for (JavaApplication consumer : consumers.values()) {
 					consumer.close();
 				}
-			}
 			if (locatorLauncher != null) {
 				locatorLauncher.stop();
 			}
@@ -227,21 +227,32 @@ public class GemfireBinderTests {
 	 * @throws AssertionError if the consumer is not bound after
 	 * {@value #TIMEOUT} milliseconds
 	 */
-	private void waitForConsumer(JavaApplication consumer) throws InterruptedException {
+	private void waitForConsumer(int port) throws InterruptedException {
 		long start = System.currentTimeMillis();
 		while (System.currentTimeMillis() < start + TIMEOUT) {
-			if (consumer.submit(new ConsumerBoundChecker())) {
+			if (isConsumerBound(port)) {
 				return;
 			}
 			else {
 				Thread.sleep(1000);
 			}
 		}
-		assertTrue("Consumer not bound", consumer.submit(new ConsumerBoundChecker()));
+		assertTrue("Consumer not bound", isConsumerBound(port));
 	}
 
-	private boolean partitionSelectorUsed(JavaApplication producer) throws InterruptedException {
-		return producer.submit(new ProducerPartitionSelectorChecker());
+	private boolean isConsumerBound(int port) {
+		RestTemplate template = new RestTemplate();
+		return template.getForObject(String.format("http://localhost:%d/is-bound", port), Boolean.class);
+	}
+
+	private String getConsumerMessagePayload(int port) {
+		RestTemplate template = new RestTemplate();
+		return template.getForObject(String.format("http://localhost:%d/message-payload", port), String.class);
+	}
+
+	private boolean partitionSelectorUsed(int port) throws InterruptedException {
+		RestTemplate template = new RestTemplate();
+		return template.getForObject(String.format("http://localhost:%d/partition-strategy-invoked", port), Boolean.class);
 	}
 
 	/**
@@ -252,11 +263,11 @@ public class GemfireBinderTests {
 	 * @return the message payload that was received
 	 * @throws InterruptedException if the thread is interrupted
 	 */
-	private String waitForMessage(JavaApplication consumer) throws InterruptedException {
+	private String waitForMessage(int port) throws InterruptedException {
 		long start = System.currentTimeMillis();
 		String message = null;
 		while (System.currentTimeMillis() < start + TIMEOUT) {
-			message = consumer.submit(new ConsumerMessageExtractor());
+			message = getConsumerMessagePayload(port);
 			if (message == null) {
 				Thread.sleep(1000);
 			}
@@ -309,7 +320,7 @@ public class GemfireBinderTests {
 	 *
 	 * @throws Exception
 	 */
-	private static Cache createCache() throws Exception {
+	public static Cache createCache() throws Exception {
 		CacheFactoryBean bean = new CacheFactoryBean();
 		Properties properties = new Properties();
 		properties.put("locators", "localhost[7777]");
@@ -320,115 +331,25 @@ public class GemfireBinderTests {
 		return bean.getObject();
 	}
 
-	public static class StubPartitionSelectorStrategy implements PartitionSelectorStrategy {
-		public volatile boolean invoked = false;
-
-		@Override
-		public int selectPartition(Object key, int partitionCount) {
-			logger.warn("Selecting partition for key {}; partition count: {}", key, partitionCount);
-			System.out.printf("Selecting partition for key %s; partition count: %d", key, partitionCount);
-			invoked = true;
-			return 1;
-		}
-	}
-
-	/**
-	 * Producer application that binds a channel to a {@link GemfireMessageChannelBinder}
-	 * and sends a test message.
-	 */
-	public static class Producer {
-		private static volatile StubPartitionSelectorStrategy partitionSelectorStrategy =
-				new StubPartitionSelectorStrategy();
-
-		public static void main(String[] args) throws Exception {
-			GemfireMessageChannelBinder binder = new GemfireMessageChannelBinder(createCache());
-			binder.setApplicationContext(new GenericApplicationContext());
-			binder.setIntegrationEvaluationContext(new StandardEvaluationContext());
-			if (Boolean.getBoolean("partitioned")) {
-				System.out.println("setting partition selector");
-				binder.setPartitionSelector(partitionSelectorStrategy);
-			}
-			binder.afterPropertiesSet();
-
-			SubscribableChannel producerChannel = new ExecutorSubscribableChannel();
-
-			ProducerProperties properties = new ProducerProperties();
-			properties.setPartitionKeyExpression(new SpelExpressionParser().parseExpression("payload"));
-			binder.bindProducer(BINDING_NAME, producerChannel, properties);
-
-			Message<String> message = new GenericMessage<>(MESSAGE_PAYLOAD);
-			producerChannel.send(message);
-
-			Thread.sleep(Long.MAX_VALUE);
-		}
-	}
-
-	/**
-	 * Consumer application that binds a channel to a {@link GemfireMessageChannelBinder}
-	 * and stores the received message payload.
-	 */
-	public static class Consumer {
-
-		/**
-		 * Flag that indicates if the consumer has been bound.
-		 */
-		private static volatile boolean isBound = false;
-
-		/**
-		 * Payload of last received message.
-		 */
-		private static volatile String messagePayload;
-
-		/**
-		 * Main method.
-		 *
-		 * @param args if present, first arg is consumer group name
-		 * @throws Exception
-		 */
-		public static void main(String[] args) throws Exception {
-			GemfireMessageChannelBinder binder = new GemfireMessageChannelBinder(createCache());
-			binder.setApplicationContext(new GenericApplicationContext());
-			binder.setIntegrationEvaluationContext(new StandardEvaluationContext());
-			binder.setBatchSize(1);
-			binder.afterPropertiesSet();
-
-			SubscribableChannel consumerChannel = new ExecutorSubscribableChannel();
-			consumerChannel.subscribe(new MessageHandler() {
-				@Override
-				public void handleMessage(Message<?> message) throws MessagingException {
-					messagePayload = (String) message.getPayload();
-				}
-			});
-			String group = null;
-			if (args.length > 0) {
-				group = args[0];
-			}
-			binder.bindConsumer(BINDING_NAME, group, consumerChannel, new ConsumerProperties());
-			isBound = true;
-
-			Thread.sleep(Long.MAX_VALUE);
-		}
-	}
-
-	public static class ConsumerBoundChecker implements RemoteCallable<Boolean> {
-		@Override
-		public Boolean call() throws Exception {
-			return Consumer.isBound;
-		}
-	}
-
-	public static class ConsumerMessageExtractor implements RemoteCallable<String> {
-		@Override
-		public String call() throws Exception {
-			return Consumer.messagePayload;
-		}
-	}
-
-	public static class ProducerPartitionSelectorChecker implements RemoteCallable<Boolean> {
-		@Override
-		public Boolean call() throws Exception {
-			return Producer.partitionSelectorStrategy.invoked;
-		}
-	}
+//	public static class ConsumerBoundChecker implements RemoteCallable<Boolean> {
+//		@Override
+//		public Boolean call() throws Exception {
+//			return Consumer.isBound;
+//		}
+//	}
+//
+//	public static class ConsumerMessageExtractor implements RemoteCallable<String> {
+//		@Override
+//		public String call() throws Exception {
+//			return Consumer.messagePayload;
+//		}
+//	}
+//
+//	public static class ProducerPartitionSelectorChecker implements RemoteCallable<Boolean> {
+//		@Override
+//		public Boolean call() throws Exception {
+//			return Producer.partitionSelectorStrategy.invoked;
+//		}
+//	}
 
 }
