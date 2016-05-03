@@ -178,8 +178,11 @@ public class GemfireMessageChannelBinder
 
 	@Override
 	public void onInit() throws Exception {
-		RegionFactory<String, ConsumerGroupTracker> regionFactory = this.cache.createRegionFactory(RegionShortcut.REPLICATE);
-		this.consumerGroupsRegion = regionFactory.setScope(Scope.GLOBAL).create(CONSUMER_GROUPS_REGION);
+		this.consumerGroupsRegion = this.cache.getRegion(CONSUMER_GROUPS_REGION);
+		if (this.consumerGroupsRegion == null) {
+			RegionFactory<String, ConsumerGroupTracker> regionFactory = this.cache.createRegionFactory(RegionShortcut.REPLICATE);
+			this.consumerGroupsRegion = regionFactory.setScope(Scope.GLOBAL).create(CONSUMER_GROUPS_REGION);
+		}
 	}
 
 	/**
@@ -381,4 +384,14 @@ public class GemfireMessageChannelBinder
 		};
 	}
 
+	@Override
+	public String toString() {
+		return "GemfireMessageChannelBinder{" +
+				"cache=" + cache +
+				", batchSize=" + batchSize +
+				", consumerRegionType=" + consumerRegionType +
+				", producerRegionType=" + producerRegionType +
+				", persistentQueue=" + persistentQueue +
+				'}';
+	}
 }

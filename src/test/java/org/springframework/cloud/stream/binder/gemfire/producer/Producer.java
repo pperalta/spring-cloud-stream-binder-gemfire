@@ -19,7 +19,7 @@ package org.springframework.cloud.stream.binder.gemfire.producer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
@@ -28,11 +28,8 @@ import org.springframework.cloud.stream.binder.PartitionSelectorStrategy;
 import org.springframework.cloud.stream.binder.ProducerProperties;
 import org.springframework.cloud.stream.binder.gemfire.GemfireBinderTests;
 import org.springframework.cloud.stream.binder.gemfire.GemfireMessageChannelBinder;
-import org.springframework.context.ApplicationContext;
-import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.annotation.Bean;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.expression.spel.support.StandardEvaluationContext;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.SubscribableChannel;
 import org.springframework.messaging.support.ExecutorSubscribableChannel;
@@ -46,26 +43,30 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @SpringBootApplication
-public class Producer implements ApplicationRunner, ApplicationContextAware {
+public class Producer implements ApplicationRunner {
 
 	private static final Logger logger = LoggerFactory.getLogger(Producer.class);
 
-	private ApplicationContext applicationContext;
+	@Autowired
+	private GemfireMessageChannelBinder binder;
 
 	public static void main(String[] args) {
-		SpringApplication.run(Producer.class);
+		SpringApplication.run(Producer.class, args);
 	}
 
 	@Override
 	public void run(ApplicationArguments args) throws Exception {
-		GemfireMessageChannelBinder binder = gemfireMessageChannelBinder();
+		if (args.containsOption("partitioned")
+				&& Boolean.valueOf(args.getOptionValues("partitioned").get(0))) {
+			binder.setPartitionSelector(stubPartitionSelectorStrategy());
+		}
 		SubscribableChannel producerChannel = producerChannel();
-
 		ProducerProperties properties = new ProducerProperties();
 		properties.setPartitionKeyExpression(new SpelExpressionParser().parseExpression("payload"));
 		binder.bindProducer(GemfireBinderTests.BINDING_NAME, producerChannel, properties);
 
 		Message<String> message = new GenericMessage<>(GemfireBinderTests.MESSAGE_PAYLOAD);
+		logger.info("Writing message to binder {}", binder);
 		producerChannel.send(message);
 
 		Thread.sleep(Long.MAX_VALUE);
@@ -81,28 +82,9 @@ public class Producer implements ApplicationRunner, ApplicationContextAware {
 		return new StubPartitionSelectorStrategy();
 	}
 
-	@Bean
-	public GemfireMessageChannelBinder gemfireMessageChannelBinder() throws Exception {
-		GemfireMessageChannelBinder binder = new GemfireMessageChannelBinder(GemfireBinderTests.createCache());
-		binder.setApplicationContext(this.applicationContext);
-		binder.setIntegrationEvaluationContext(new StandardEvaluationContext());
-		// todo
-		if (Boolean.getBoolean("partitioned")) {
-			System.out.println("setting partition selector");
-			binder.setPartitionSelector(stubPartitionSelectorStrategy());
-		}
-		binder.afterPropertiesSet();
-		return binder;
-	}
-
 	@RequestMapping("/partition-strategy-invoked")
 	public boolean partitionStrategyInvoked() {
 		return stubPartitionSelectorStrategy().invoked;
-	}
-
-	@Override
-	public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
-		this.applicationContext = applicationContext;
 	}
 
 
@@ -111,8 +93,7 @@ public class Producer implements ApplicationRunner, ApplicationContextAware {
 
 		@Override
 		public int selectPartition(Object key, int partitionCount) {
-			logger.warn("Selecting partition for key {}; partition count: {}", key, partitionCount);
-			System.out.printf("Selecting partition for key %s; partition count: %d", key, partitionCount);
+			logger.info("Selecting partition for key {}; partition count: {}", key, partitionCount);
 			invoked = true;
 			return 1;
 		}
